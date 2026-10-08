@@ -1,0 +1,1023 @@
+name: Build APK
+
+on:
+  push:
+    branches: [ main, master ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: "Мій Браузер"   # <- тут змінюєш назву застосунку
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Create project files
+        run: |
+          cat > settings.gradle <<'GHEOF'
+          pluginManagement {
+              repositories {
+                  google()
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+              plugins {
+                  id 'com.android.application' version '8.5.2'
+              }
+          }
+          dependencyResolutionManagement {
+              repositoriesMode.set(RepositoriesMode.FAIL_ON_PROJECT_REPOS)
+              repositories {
+                  google()
+                  mavenCentral()
+              }
+          }
+          rootProject.name = "MyBrowser"
+          include ':app'
+          GHEOF
+          mkdir -p app
+          cat > app/build.gradle <<'GHEOF'
+          plugins {
+              id 'com.android.application'
+          }
+
+          android {
+              namespace 'com.example.mybrowser'
+              compileSdk 34
+
+              defaultConfig {
+                  applicationId "com.example.mybrowser"
+                  minSdk 24
+                  targetSdk 34
+                  versionCode 1
+                  versionName "1.0"
+              }
+
+              buildTypes {
+                  release {
+                      minifyEnabled false
+                  }
+              }
+
+              compileOptions {
+                  sourceCompatibility JavaVersion.VERSION_17
+                  targetCompatibility JavaVersion.VERSION_17
+              }
+          }
+          GHEOF
+          mkdir -p app/src/main
+          cat > app/src/main/AndroidManifest.xml <<'GHEOF'
+          <?xml version="1.0" encoding="utf-8"?>
+          <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+
+              <uses-permission android:name="android.permission.INTERNET" />
+              <uses-permission
+                  android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+                  android:maxSdkVersion="28" />
+
+              <application
+                  android:label="Мій Браузер"
+                  android:icon="@android:drawable/sym_def_app_icon"
+                  android:usesCleartextTraffic="true"
+                  android:theme="@android:style/Theme.DeviceDefault.Light.NoActionBar">
+
+                  <activity
+                      android:name=".MainActivity"
+                      android:exported="true"
+                      android:windowSoftInputMode="adjustResize"
+                      android:configChanges="orientation|screenSize|keyboardHidden|smallestScreenSize|screenLayout">
+                      <intent-filter>
+                          <action android:name="android.intent.action.MAIN" />
+                          <category android:name="android.intent.category.LAUNCHER" />
+                      </intent-filter>
+                      <intent-filter>
+                          <action android:name="android.intent.action.VIEW" />
+                          <category android:name="android.intent.category.DEFAULT" />
+                          <category android:name="android.intent.category.BROWSABLE" />
+                          <data android:scheme="http" />
+                          <data android:scheme="https" />
+                      </intent-filter>
+                  </activity>
+              </application>
+          </manifest>
+          GHEOF
+          mkdir -p app/src/main/java/com/example/mybrowser
+          cat > app/src/main/java/com/example/mybrowser/MainActivity.java <<'GHEOF'
+          package com.example.mybrowser;
+
+          import android.Manifest;
+          import android.app.Activity;
+          import android.app.AlertDialog;
+          import android.app.DownloadManager;
+          import android.content.ClipData;
+          import android.content.ClipboardManager;
+          import android.content.Context;
+          import android.content.Intent;
+          import android.content.SharedPreferences;
+          import android.graphics.Bitmap;
+          import android.graphics.Typeface;
+          import android.net.Uri;
+          import android.os.Build;
+          import android.os.Bundle;
+          import android.os.Environment;
+          import android.os.Message;
+          import android.text.InputType;
+          import android.view.Gravity;
+          import android.view.View;
+          import android.view.ViewGroup;
+          import android.view.inputmethod.EditorInfo;
+          import android.view.inputmethod.InputMethodManager;
+          import android.webkit.CookieManager;
+          import android.webkit.URLUtil;
+          import android.webkit.WebChromeClient;
+          import android.webkit.WebResourceRequest;
+          import android.webkit.WebResourceResponse;
+          import android.webkit.WebSettings;
+          import android.webkit.WebView;
+          import android.webkit.WebViewClient;
+          import android.widget.Button;
+          import android.widget.EditText;
+          import android.widget.FrameLayout;
+          import android.widget.LinearLayout;
+          import android.widget.ProgressBar;
+          import android.widget.ScrollView;
+          import android.widget.Toast;
+
+          import org.json.JSONArray;
+          import org.json.JSONObject;
+          import org.json.JSONTokener;
+
+          import java.io.BufferedReader;
+          import java.io.ByteArrayInputStream;
+          import java.io.File;
+          import java.io.FileOutputStream;
+          import java.io.FileReader;
+          import java.io.InputStreamReader;
+          import java.net.HttpURLConnection;
+          import java.net.URL;
+          import java.nio.charset.StandardCharsets;
+          import java.util.ArrayList;
+          import java.util.Collections;
+          import java.util.HashSet;
+          import java.util.List;
+          import java.util.Set;
+          import java.util.concurrent.ConcurrentHashMap;
+          import java.util.concurrent.CopyOnWriteArrayList;
+          import java.util.regex.Pattern;
+
+          public class MainActivity extends Activity {
+
+              static final String DESKTOP_UA =
+                      "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36";
+              static final Pattern MEDIA = Pattern.compile(".*\\.(mp4|m3u8|webm|mkv|mov|flv|mp3|m4a|mpd)$");
+              static final String AD_CSS_JS =
+                      "(function(){var s=document.createElement('style');"
+                      + "s.textContent='ins.adsbygoogle,[id^=\"google_ads\"],iframe[src*=\"doubleclick\"],"
+                      + "iframe[src*=\"googlesyndication\"],[class*=\"ad-banner\"],[id*=\"ad-banner\"]{display:none!important}';"
+                      + "document.documentElement.appendChild(s)})()";
+              static final String[] DEFAULT_ADS = {
+                      "doubleclick.net", "googlesyndication.com", "googleadservices.com", "adservice.google.com",
+                      "adnxs.com", "taboola.com", "outbrain.com", "popads.net", "propellerads.com",
+                      "exoclick.com", "adsterra.com", "popcash.net", "juicyads.com", "trafficjunky.net",
+                      "mgid.com", "revcontent.com", "criteo.com", "pubmatic.com", "rubiconproject.com",
+                      "adcolony.com", "unityads.unity3d.com", "ads.yahoo.com", "amazon-adsystem.com"
+              };
+
+              WebView web;
+              EditText urlBar;
+              ProgressBar bar;
+              WebChromeClient chrome;
+              View customView;
+              WebChromeClient.CustomViewCallback customCb;
+
+              SharedPreferences cfg, edits;
+              boolean adblock, antiRedirect, desktop;
+              final Set<String> blocked = ConcurrentHashMap.newKeySet();
+              final Set<String> allowed = ConcurrentHashMap.newKeySet();
+              final Set<String> adHosts = ConcurrentHashMap.newKeySet();
+              final List<String> media = new CopyOnWriteArrayList<>();
+
+              // ---------------------------------------------------------------- lifecycle
+
+              @Override
+              protected void onCreate(Bundle b) {
+                  super.onCreate(b);
+                  cfg = getSharedPreferences("cfg", MODE_PRIVATE);
+                  edits = getSharedPreferences("edits", MODE_PRIVATE);
+                  adblock = cfg.getBoolean("adblock", true);
+                  antiRedirect = cfg.getBoolean("anti", true);
+                  desktop = cfg.getBoolean("desktop", false);
+                  blocked.addAll(cfg.getStringSet("blocked", new HashSet<String>()));
+                  allowed.addAll(cfg.getStringSet("allowed", new HashSet<String>()));
+                  loadAdHosts();
+                  if (cfg.getString("plugins", null) == null) seedPlugins();
+
+                  buildUi();
+
+                  if (Build.VERSION.SDK_INT <= 28) {
+                      requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, 1);
+                  }
+                  Uri d = getIntent().getData();
+                  open(d != null ? d.toString() : "https://www.google.com");
+              }
+
+              @Override
+              protected void onPause() {
+                  super.onPause();
+                  CookieManager.getInstance().flush();
+              }
+
+              @Override
+              protected void onDestroy() {
+                  if (web != null) web.destroy();
+                  super.onDestroy();
+              }
+
+              @Override
+              public void onBackPressed() {
+                  if (customView != null) {
+                      chrome.onHideCustomView();
+                  } else if (web.canGoBack()) {
+                      web.goBack();
+                  } else {
+                      super.onBackPressed();
+                  }
+              }
+
+              // ---------------------------------------------------------------- UI
+
+              int dp(int v) {
+                  return (int) (v * getResources().getDisplayMetrics().density);
+              }
+
+              Button btn(String t) {
+                  Button x = new Button(this);
+                  x.setText(t);
+                  x.setAllCaps(false);
+                  x.setMinWidth(0);
+                  x.setMinimumWidth(0);
+                  x.setTextSize(18);
+                  x.setPadding(dp(10), 0, dp(10), 0);
+                  x.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, dp(44)));
+                  return x;
+              }
+
+              void buildUi() {
+                  LinearLayout root = new LinearLayout(this);
+                  root.setOrientation(LinearLayout.VERTICAL);
+
+                  LinearLayout top = new LinearLayout(this);
+                  top.setOrientation(LinearLayout.HORIZONTAL);
+                  top.setGravity(Gravity.CENTER_VERTICAL);
+                  top.setPadding(dp(4), dp(4), dp(4), dp(4));
+
+                  Button back = btn("◀");
+                  back.setOnClickListener(v -> { if (web.canGoBack()) web.goBack(); });
+                  Button fwd = btn("▶");
+                  fwd.setOnClickListener(v -> { if (web.canGoForward()) web.goForward(); });
+                  Button more = btn("⋮");
+                  more.setOnClickListener(v -> showMenu());
+
+                  urlBar = new EditText(this);
+                  urlBar.setSingleLine(true);
+                  urlBar.setTextSize(15);
+                  urlBar.setSelectAllOnFocus(true);
+                  urlBar.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                  urlBar.setImeOptions(EditorInfo.IME_ACTION_GO);
+                  urlBar.setLayoutParams(new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+                  urlBar.setOnEditorActionListener((tv, id, ev) -> {
+                      open(urlBar.getText().toString());
+                      urlBar.clearFocus();
+                      InputMethodManager imm = (InputMethodManager) getSystemService(Context.INPUT_METHOD_SERVICE);
+                      imm.hideSoftInputFromWindow(urlBar.getWindowToken(), 0);
+                      web.requestFocus();
+                      return true;
+                  });
+
+                  top.addView(back);
+                  top.addView(fwd);
+                  top.addView(urlBar);
+                  top.addView(more);
+
+                  bar = new ProgressBar(this, null, android.R.attr.progressBarStyleHorizontal);
+                  bar.setMax(100);
+                  bar.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(3)));
+
+                  web = new WebView(this);
+                  web.setLayoutParams(new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+
+                  root.addView(top);
+                  root.addView(bar);
+                  root.addView(web);
+                  setContentView(root);
+
+                  setupWebView();
+              }
+
+              void setupWebView() {
+                  WebSettings s = web.getSettings();
+                  s.setJavaScriptEnabled(true);
+                  s.setDomStorageEnabled(true);
+                  s.setSupportZoom(true);
+                  s.setBuiltInZoomControls(true);
+                  s.setDisplayZoomControls(false);
+                  s.setSupportMultipleWindows(true);
+                  s.setJavaScriptCanOpenWindowsAutomatically(false);
+                  applyDesktop();
+
+                  CookieManager cm = CookieManager.getInstance();
+                  cm.setAcceptCookie(true);
+                  cm.setAcceptThirdPartyCookies(web, true);
+
+                  web.setDownloadListener((url, ua, cd, mime, len) -> startDownload(url, ua, cd, mime));
+
+                  web.setWebViewClient(new WebViewClient() {
+                      @Override
+                      public boolean shouldOverrideUrlLoading(WebView v, WebResourceRequest r) {
+                          Uri u = r.getUrl();
+                          String sc = u.getScheme();
+                          if (sc == null) return true;
+                          if (sc.equals("about") || sc.equals("javascript") || sc.equals("data")
+                                  || sc.equals("blob") || sc.equals("file")) return false;
+                          if (!sc.equals("http") && !sc.equals("https")) {
+                              // tel:, mailto:, market:, intent: ... only with real user tap
+                              if (r.hasGesture()) {
+                                  try { startActivity(new Intent(Intent.ACTION_VIEW, u)); } catch (Exception ignored) { }
+                              } else {
+                                  toast("Заблоковано авто-відкриття: " + sc + ":");
+                              }
+                              return true;
+                          }
+                          if (!r.isForMainFrame()) return false;
+                          String host = u.getHost() == null ? "" : u.getHost().toLowerCase();
+                          if (hostIn(blocked, host)) {
+                              toast("Сайт заблоковано: " + host);
+                              return true;
+                          }
+                          if (antiRedirect && !r.hasGesture() && !r.isRedirect()
+                                  && !sameSite(hostOf(v.getUrl()), host) && !hostIn(allowed, host)) {
+                              blocked.add(host);
+                              saveSets();
+                              toast("Заблоковано примусове перекидання на " + host + "  (⋮ → Заблоковані сайти)");
+                              return true;
+                          }
+                          return false;
+                      }
+
+                      @Override
+                      public WebResourceResponse shouldInterceptRequest(WebView v, WebResourceRequest r) {
+                          Uri u = r.getUrl();
+                          String sc = u.getScheme();
+                          if (sc == null || !(sc.equals("http") || sc.equals("https"))) return null;
+                          String host = u.getHost() == null ? "" : u.getHost().toLowerCase();
+
+                          if (hostIn(blocked, host)) {
+                              if (r.isForMainFrame()) {
+                                  String html = "<html><head><meta name='viewport' content='width=device-width'></head>"
+                                          + "<body style='font-family:sans-serif;padding:24px'><h2>⛔ Сайт заблоковано</h2><p>"
+                                          + host + "</p><p>Розблокувати: ⋮ → Заблоковані сайти</p></body></html>";
+                                  return new WebResourceResponse("text/html", "UTF-8",
+                                          new ByteArrayInputStream(html.getBytes(StandardCharsets.UTF_8)));
+                              }
+                              return empty();
+                          }
+                          if (adblock && hostIn(adHosts, host)) return empty();
+
+                          String p = u.getPath();
+                          if (p != null && MEDIA.matcher(p.toLowerCase()).matches()) {
+                              String full = u.toString();
+                              if (!media.contains(full)) media.add(full);
+                          }
+                          return null;
+                      }
+
+                      @Override
+                      public void onPageStarted(WebView v, String url, Bitmap icon) {
+                          media.clear();
+                          if (!urlBar.hasFocus()) urlBar.setText(url);
+                          bar.setVisibility(View.VISIBLE);
+                      }
+
+                      @Override
+                      public void onPageFinished(WebView v, String url) {
+                          bar.setVisibility(View.GONE);
+                          if (!urlBar.hasFocus()) urlBar.setText(url);
+                          applyEdit(url, false);
+                          if (adblock) js(AD_CSS_JS);
+                          runPlugins(url);
+                      }
+                  });
+
+                  chrome = new WebChromeClient() {
+                      @Override
+                      public void onProgressChanged(WebView v, int p) {
+                          bar.setProgress(p);
+                          bar.setVisibility(p >= 100 ? View.GONE : View.VISIBLE);
+                      }
+
+                      @Override
+                      public boolean onCreateWindow(WebView v, boolean isDialog, boolean userGesture, Message msg) {
+                          if (!userGesture) return false; // popup without tap = blocked
+                          final boolean[] done = {false};
+                          WebView t = new WebView(MainActivity.this);
+                          t.setWebViewClient(new WebViewClient() {
+                              @Override
+                              public boolean shouldOverrideUrlLoading(WebView x, WebResourceRequest r) {
+                                  openFromPopup(r.getUrl().toString(), done);
+                                  return true;
+                              }
+
+                              @Override
+                              public void onPageStarted(WebView x, String url, Bitmap icon) {                                  if (url != null && url.startsWith("http")) {
+                                      openFromPopup(url, done);
+                                      x.stopLoading();
+                                  }
+                              }
+                          });
+                          ((WebView.WebViewTransport) msg.obj).setWebView(t);
+                          msg.sendToTarget();
+                          return true;
+                      }
+
+                      @Override
+                      public void onShowCustomView(View view, CustomViewCallback cb) {
+                          customView = view;
+                          customCb = cb;
+                          ((ViewGroup) getWindow().getDecorView()).addView(view,
+                                  new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+                      }
+
+                      @Override
+                      public void onHideCustomView() {
+                          if (customView == null) return;
+                          ((ViewGroup) getWindow().getDecorView()).removeView(customView);
+                          customView = null;
+                          if (customCb != null) customCb.onCustomViewHidden();
+                      }
+                  };
+                  web.setWebChromeClient(chrome);
+              }
+
+              void openFromPopup(String url, boolean[] done) {
+                  if (done[0]) return;
+                  done[0] = true;
+                  if (!hostIn(blocked, hostOf(url))) web.loadUrl(url);
+              }
+
+              WebResourceResponse empty() {
+                  return new WebResourceResponse("text/plain", "UTF-8", new ByteArrayInputStream(new byte[0]));
+              }
+
+              void applyDesktop() {
+                  WebSettings s = web.getSettings();
+                  s.setUseWideViewPort(true);
+                  if (desktop) {
+                      s.setUserAgentString(DESKTOP_UA);
+                      s.setLoadWithOverviewMode(true);
+                  } else {
+                      s.setUserAgentString(null);
+                      s.setLoadWithOverviewMode(false);
+                  }
+              }
+
+              // ---------------------------------------------------------------- helpers
+
+              void toast(String s) {
+                  runOnUiThread(() -> Toast.makeText(this, s, Toast.LENGTH_LONG).show());
+              }
+
+              void js(String code) {
+                  web.evaluateJavascript(code, null);
+              }
+
+              String unq(String v) {
+                  try {
+                      Object o = new JSONTokener(v).nextValue();
+                      return (o == null || o == JSONObject.NULL) ? "" : o.toString();
+                  } catch (Exception e) {
+                      return "";
+                  }
+              }
+
+              String hostOf(String url) {
+                  try {
+                      if (url == null) return "";
+                      String h = Uri.parse(url).getHost();
+                      return h == null ? "" : h.toLowerCase();
+                  } catch (Exception e) {
+                      return "";
+                  }
+              }
+
+              boolean sameSite(String a, String b) {
+                  if (a.isEmpty() || b.isEmpty()) return true;
+                  if (a.startsWith("www.")) a = a.substring(4);
+                  if (b.startsWith("www.")) b = b.substring(4);
+                  return a.equals(b) || a.endsWith("." + b) || b.endsWith("." + a);
+              }
+
+              boolean hostIn(Set<String> set, String host) {
+                  if (host == null || host.isEmpty()) return false;
+                  while (true) {
+                      if (set.contains(host)) return true;
+                      int i = host.indexOf('.');
+                      if (i < 0) return false;
+                      host = host.substring(i + 1);
+                  }
+              }
+
+              String key(String url) {
+                  if (url == null) return "";
+                  int i = url.indexOf('#');
+                  return i < 0 ? url : url.substring(0, i);
+              }
+
+              void saveSets() {
+                  cfg.edit().putStringSet("blocked", new HashSet<>(blocked))
+                          .putStringSet("allowed", new HashSet<>(allowed)).apply();
+              }
+
+              void open(String in) {
+                  in = in.trim();
+                  if (in.isEmpty()) return;
+                  String url;
+                  if (in.matches("^[a-zA-Z][a-zA-Z0-9+.-]*://.*")) url = in;
+                  else if (in.contains(".") && !in.contains(" ")) url = "https://" + in;
+                  else url = "https://www.google.com/search?q=" + Uri.encode(in);
+                  web.loadUrl(url);
+              }
+
+              String fetch(String u) throws Exception {
+                  HttpURLConnection c = (HttpURLConnection) new URL(u).openConnection();
+                  c.setConnectTimeout(15000);
+                  c.setReadTimeout(30000);
+                  BufferedReader r = new BufferedReader(new InputStreamReader(c.getInputStream(), StandardCharsets.UTF_8));
+                  StringBuilder sb = new StringBuilder();
+                  String line;
+                  while ((line = r.readLine()) != null) sb.append(line).append('\n');
+                  r.close();
+                  return sb.toString();
+              }
+
+              // ---------------------------------------------------------------- menu (⋮)
+
+              void showMenu() {
+                  String on = "✅ ", off = "⬜ ";
+                  String[] items = {
+                          "🔄 Оновити",
+                          (adblock ? on : off) + "Блокувач реклами",
+                          (antiRedirect ? on : off) + "Антиперекидання / блок спливаючих",
+                          "⛔ Заблокувати цей сайт",
+                          "📋 Заблоковані сайти (" + blocked.size() + ")",
+                          "🎬 Відео / медіа на сторінці (" + media.size() + ")",
+                          "✏️ Редагувати HTML (код)",
+                          "🖊 Візуальне редагування (торкнись і пиши)",
+                          "💾 Зберегти правки сторінки",
+                          "♻️ Скинути збережені правки сторінки",
+                          "🧩 Плагіни (скрипти)",
+                          "🛠 Developer (консоль / інспектор)",
+                          (desktop ? on : off) + "Версія для ПК",
+                          "⬇️ Оновити списки реклами"
+                  };
+                  new AlertDialog.Builder(this).setItems(items, (d, w) -> {
+                      switch (w) {
+                          case 0: web.reload(); break;
+                          case 1:
+                              adblock = !adblock;
+                              cfg.edit().putBoolean("adblock", adblock).apply();
+                              toast("Блокувач реклами: " + (adblock ? "увімкнено" : "вимкнено"));
+                              web.reload();
+                              break;
+                          case 2:
+                              antiRedirect = !antiRedirect;
+                              cfg.edit().putBoolean("anti", antiRedirect).apply();
+                              toast("Антиперекидання: " + (antiRedirect ? "увімкнено" : "вимкнено"));
+                              break;
+                          case 3: blockCurrent(); break;
+                          case 4: showBlocked(); break;
+                          case 5: showMedia(); break;
+                          case 6: editHtml(); break;
+                          case 7:
+                              js("document.designMode='on'");
+                              toast("Торкнись тексту і редагуй. Потім ⋮ → Зберегти правки сторінки");
+                              break;
+                          case 8: saveEdits(); break;
+                          case 9:
+                              edits.edit().remove(key(web.getUrl())).apply();
+                              toast("Правки цієї сторінки видалено");
+                              web.reload();
+                              break;
+                          case 10: showPlugins(); break;
+                          case 11:
+                              js("(function(){if(window.eruda){eruda.show();return}var s=document.createElement('script');"
+                                      + "s.src='https://cdn.jsdelivr.net/npm/eruda';"
+                                      + "s.onload=function(){eruda.init();eruda.show()};document.body.appendChild(s)})()");
+                              break;
+                          case 12:
+                              desktop = !desktop;
+                              cfg.edit().putBoolean("desktop", desktop).apply();
+                              applyDesktop();
+                              web.reload();
+                              break;
+                          case 13: updateAdLists(); break;
+                          default: break;
+                      }
+                  }).show();
+              }
+
+              // ---------------------------------------------------------------- blocked sites
+
+              void blockCurrent() {
+                  String host = hostOf(web.getUrl());
+                  if (host.isEmpty()) return;
+                  blocked.add(host);
+                  allowed.remove(host);
+                  saveSets();
+                  toast("Заблоковано: " + host);
+                  if (web.canGoBack()) web.goBack(); else web.loadUrl("about:blank");
+              }
+
+              void showBlocked() {
+                  final List<String> l = new ArrayList<>(blocked);
+                  Collections.sort(l);
+                  if (l.isEmpty()) {
+                      toast("Список заблокованих порожній");
+                      return;
+                  }
+                  new AlertDialog.Builder(this)
+                          .setTitle("Заблоковані — торкнись, щоб розблокувати")
+                          .setItems(l.toArray(new String[0]), (d, w) -> {
+                              String h = l.get(w);
+                              blocked.remove(h);
+                              allowed.add(h);
+                              saveSets();
+                              toast("Розблоковано: " + h);
+                          })
+                          .setNeutralButton("Розблокувати всі", (d, w) -> {
+                              allowed.addAll(blocked);
+                              blocked.clear();
+                              saveSets();
+                              toast("Усі розблоковано");
+                          })
+                          .setNegativeButton("Закрити", null)
+                          .show();
+              }
+
+              // ---------------------------------------------------------------- video / downloads
+
+              void showMedia() {
+                  web.evaluateJavascript(
+                          "JSON.stringify([].slice.call(document.querySelectorAll('video,audio,source'))"
+                                  + ".map(function(e){return e.currentSrc||e.src})"
+                                  + ".filter(function(s){return s&&s.indexOf('http')==0}))",
+                          v -> {
+                              try {
+                                  JSONArray a = new JSONArray(unq(v));
+                                  for (int i = 0; i < a.length(); i++) {
+                                      String s = a.getString(i);
+                                      if (!media.contains(s)) media.add(s);
+                                  }
+                              } catch (Exception ignored) { }
+                              displayMedia();
+                          });
+              }
+
+              void displayMedia() {
+                  final List<String> l = new ArrayList<>(media);
+                  if (l.isEmpty()) {
+                      toast("Відео не знайдено. Запусти відео на сторінці й відкрий цей пункт ще раз.");
+                      return;
+                  }
+                  String[] names = new String[l.size()];
+                  for (int i = 0; i < l.size(); i++) {
+                      String u = l.get(i);
+                      String p = Uri.parse(u).getLastPathSegment();
+                      names[i] = (p == null ? "media" : p) + "  (" + hostOf(u) + ")";
+                  }
+                  new AlertDialog.Builder(this)
+                          .setTitle("Знайдені файли — торкнись, щоб скачати")
+                          .setItems(names, (d, w) -> {
+                              String u = l.get(w);
+                              String path = Uri.parse(u).getPath();
+                              String low = path == null ? "" : path.toLowerCase();
+                              if (low.endsWith(".m3u8") || low.endsWith(".mpd")) {
+                                  ClipboardManager cb = (ClipboardManager) getSystemService(Context.CLIPBOARD_SERVICE);
+                                  cb.setPrimaryClip(ClipData.newPlainText("url", u));
+                                  toast("Це потік (HLS/DASH): посилання скопійовано. Звичайним завантаженням він не скачується.");
+                              } else {
+                                  startDownload(u, null, null, null);
+                              }
+                          })
+                          .setNegativeButton("Закрити", null)
+                          .show();
+              }
+
+              void startDownload(String url, String ua, String cd, String mime) {
+                  try {
+                      String name = URLUtil.guessFileName(url, cd, mime);
+                      DownloadManager.Request r = new DownloadManager.Request(Uri.parse(url));
+                      String ck = CookieManager.getInstance().getCookie(url);
+                      if (ck != null) r.addRequestHeader("Cookie", ck);
+                      r.addRequestHeader("User-Agent", ua != null ? ua : web.getSettings().getUserAgentString());
+                      String ref = web.getUrl();
+                      if (ref != null) r.addRequestHeader("Referer", ref);
+                      if (mime != null) r.setMimeType(mime);
+                      r.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+                      r.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, name);
+                      ((DownloadManager) getSystemService(DOWNLOAD_SERVICE)).enqueue(r);
+                      toast("Завантаження: " + name);
+                  } catch (Exception e) {
+                      toast("Не вдалося скачати: " + e.getMessage());
+                  }
+              }
+
+              // ---------------------------------------------------------------- HTML editing
+
+              void editHtml() {
+                  web.evaluateJavascript("document.documentElement.outerHTML", v -> {
+                      String html = "<!DOCTYPE html>\n" + unq(v);
+                      final String pageUrl = web.getUrl();
+                      final EditText et = new EditText(this);
+                      et.setText(html);
+                      et.setTypeface(Typeface.MONOSPACE);
+                      et.setTextSize(12);
+                      et.setGravity(Gravity.TOP | Gravity.START);
+                      et.setHorizontallyScrolling(false);
+                      et.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                              | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+                      FrameLayout box = new FrameLayout(this);
+                      box.setPadding(dp(8), dp(8), dp(8), dp(8));
+                      box.addView(et, new FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT,
+                              getResources().getDisplayMetrics().heightPixels * 6 / 10));
+                      new AlertDialog.Builder(this)
+                              .setTitle("HTML: " + hostOf(pageUrl))
+                              .setView(box)
+                              .setPositiveButton("💾 Зберегти", (d, w) -> {
+                                  edits.edit().putString(key(pageUrl), et.getText().toString()).apply();
+                                  applyEdit(pageUrl, true);
+                                  toast("Збережено — правки лишаться після оновлення сторінки");
+                              })
+                              .setNegativeButton("Скасувати", null)
+                              .show();
+                  });
+              }
+
+              void saveEdits() {
+                  js("document.designMode='off'");
+                  final String pageUrl = web.getUrl();
+                  web.evaluateJavascript("document.documentElement.outerHTML", v -> {
+                      edits.edit().putString(key(pageUrl), "<!DOCTYPE html>\n" + unq(v)).apply();
+                      toast("Збережено ✔");
+                  });
+              }
+
+              void applyEdit(String url, boolean force) {
+                  String html = edits.getString(key(url), null);
+                  if (html == null) return;
+                  js("(function(){" + (force ? "" : "if(window.__nzApplied)return;")
+                          + "window.__nzApplied=1;document.open();document.write(" + JSONObject.quote(html)
+                          + ");document.close();})()");
+              }
+
+              // ---------------------------------------------------------------- plugins (user scripts)
+
+              JSONObject plugin(String name, String match, String code, boolean on) throws Exception {
+                  JSONObject o = new JSONObject();
+                  o.put("name", name);
+                  o.put("match", match);
+                  o.put("code", code);
+                  o.put("on", on);
+                  return o;
+              }
+
+              void seedPlugins() {
+                  try {
+                      JSONArray a = new JSONArray();
+                      a.put(plugin("Темна тема", "",
+                              "var s=document.createElement('style');s.textContent='html{filter:invert(1) hue-rotate(180deg)}"
+                                      + "img,video,picture,canvas,svg{filter:invert(1) hue-rotate(180deg)}';"
+                                      + "document.documentElement.appendChild(s);", false));
+                      a.put(plugin("Дозволити копіювання тексту", "",
+                              "var s=document.createElement('style');s.textContent='*{-webkit-user-select:text!important;"
+                                      + "user-select:text!important}';document.documentElement.appendChild(s);"
+                                      + "['copy','cut','contextmenu','selectstart'].forEach(function(e){"
+                                      + "document.addEventListener(e,function(ev){ev.stopImmediatePropagation()},true)});", false));
+                      cfg.edit().putString("plugins", a.toString()).apply();
+                  } catch (Exception ignored) { }
+              }
+
+              JSONArray plugins() {
+                  try {
+                      return new JSONArray(cfg.getString("plugins", "[]"));
+                  } catch (Exception e) {
+                      return new JSONArray();
+                  }
+              }
+
+              void savePlugins(JSONArray a) {
+                  cfg.edit().putString("plugins", a.toString()).apply();
+              }
+
+              void runPlugins(String url) {
+                  JSONArray a = plugins();
+                  for (int i = 0; i < a.length(); i++) {
+                      JSONObject p = a.optJSONObject(i);
+                      if (p == null || !p.optBoolean("on", true)) continue;
+                      String m = p.optString("match", "");
+                      if (!m.isEmpty() && (url == null || !url.contains(m))) continue;
+                      js("(function(){try{" + p.optString("code") + "\n}catch(e){console.log('plugin error',e)}})();");
+                  }
+              }
+
+              void showPlugins() {
+                  final JSONArray a = plugins();
+                  final int n = a.length();
+                  List<String> l = new ArrayList<>();
+                  for (int i = 0; i < n; i++) {
+                      JSONObject p = a.optJSONObject(i);
+                      String m = p.optString("match", "");
+                      l.add((p.optBoolean("on", true) ? "✅ " : "⬜ ") + p.optString("name")
+                              + (m.isEmpty() ? "" : "  [" + m + "]"));
+                  }
+                  l.add("➕ Додати плагін (вставити JS-код)");
+                  l.add("🌐 Встановити з посилання (.js)");
+                  new AlertDialog.Builder(this)
+                          .setTitle("Плагіни")
+                          .setItems(l.toArray(new String[0]), (d, w) -> {
+                              if (w == n) pluginEditor(-1);
+                              else if (w == n + 1) installFromUrl();
+                              else pluginActions(w);
+                          })
+                          .setNegativeButton("Закрити", null)
+                          .show();
+              }
+
+              void pluginActions(final int idx) {
+                  new AlertDialog.Builder(this)
+                          .setItems(new String[]{"🔁 Увімкнути / вимкнути", "✏️ Редагувати", "🗑 Видалити"}, (d, w) -> {
+                              JSONArray a = plugins();
+                              try {
+                                  if (w == 0) {
+                                      JSONObject p = a.getJSONObject(idx);
+                                      p.put("on", !p.optBoolean("on", true));
+                                      savePlugins(a);
+                                      web.reload();
+                                  } else if (w == 1) {
+                                      pluginEditor(idx);
+                                  } else {
+                                      a.remove(idx);
+                                      savePlugins(a);
+                                      toast("Видалено");
+                                  }
+                              } catch (Exception e) {
+                                  toast("Помилка: " + e.getMessage());
+                              }
+                          }).show();
+              }
+
+              EditText field(String hint, String text, boolean code) {
+                  EditText e = new EditText(this);
+                  e.setHint(hint);
+                  e.setText(text);
+                  if (code) {
+                      e.setTypeface(Typeface.MONOSPACE);
+                      e.setTextSize(12);
+                      e.setMinLines(8);
+                      e.setGravity(Gravity.TOP | Gravity.START);
+                      e.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_FLAG_MULTI_LINE
+                              | InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS);
+                  }
+                  return e;
+              }
+
+              void pluginEditor(final int idx) {
+                  final JSONArray a = plugins();
+                  final JSONObject cur = idx >= 0 ? a.optJSONObject(idx) : null;
+                  LinearLayout box = new LinearLayout(this);
+                  box.setOrientation(LinearLayout.VERTICAL);
+                  box.setPadding(dp(16), dp(8), dp(16), dp(8));
+                  final EditText n = field("Назва", cur == null ? "" : cur.optString("name"), false);
+                  final EditText m = field("Сайт (частина адреси; порожньо = усі сайти)", cur == null ? "" : cur.optString("match"), false);
+                  final EditText c = field("JavaScript код", cur == null ? "" : cur.optString("code"), true);
+                  box.addView(n);
+                  box.addView(m);
+                  box.addView(c);
+                  ScrollView sv = new ScrollView(this);
+                  sv.addView(box);
+                  new AlertDialog.Builder(this)
+                          .setTitle(idx >= 0 ? "Редагувати плагін" : "Новий плагін")
+                          .setView(sv)
+                          .setPositiveButton("💾 Зберегти", (d, w) -> {
+                              try {
+                                  String name = n.getText().toString().trim();
+                                  if (name.isEmpty()) name = "Плагін";
+                                  JSONObject p = plugin(name, m.getText().toString().trim(),
+                                          c.getText().toString(), cur == null || cur.optBoolean("on", true));
+                                  if (idx >= 0) a.put(idx, p); else a.put(p);
+                                  savePlugins(a);
+                                  toast("Плагін збережено");
+                                  web.reload();
+                              } catch (Exception e) {
+                                  toast("Помилка: " + e.getMessage());
+                              }
+                          })
+                          .setNegativeButton("Скасувати", null)
+                          .show();
+              }
+
+              void installFromUrl() {
+                  final EditText in = field("https://.../script.js", "", false);
+                  in.setInputType(InputType.TYPE_CLASS_TEXT | InputType.TYPE_TEXT_VARIATION_URI);
+                  new AlertDialog.Builder(this)
+                          .setTitle("Посилання на .js")
+                          .setView(in)
+                          .setPositiveButton("Встановити", (d, w) -> {
+                              final String u = in.getText().toString().trim();
+                              new Thread(() -> {
+                                  try {
+                                      final String code = fetch(u);
+                                      String nm = Uri.parse(u).getLastPathSegment();
+                                      final String name = nm == null ? "Плагін" : nm;
+                                      runOnUiThread(() -> {
+                                          try {
+                                              JSONArray a = plugins();
+                                              a.put(plugin(name, "", code, true));
+                                              savePlugins(a);
+                                              toast("Плагін встановлено: " + name);
+                                          } catch (Exception ignored) { }
+                                      });
+                                  } catch (Exception e) {
+                                      toast("Не вдалося завантажити: " + e.getMessage());
+                                  }
+                              }).start();
+                          })
+                          .setNegativeButton("Скасувати", null)
+                          .show();
+              }
+
+              // ---------------------------------------------------------------- ad lists
+
+              void loadAdHosts() {
+                  for (String h : DEFAULT_ADS) adHosts.add(h);
+                  File f = new File(getFilesDir(), "adhosts.txt");
+                  if (!f.exists()) return;
+                  try (BufferedReader r = new BufferedReader(new FileReader(f))) {
+                      String line;
+                      while ((line = r.readLine()) != null) {
+                          line = line.trim();
+                          if (line.isEmpty() || line.startsWith("#")) continue;
+                          String[] p = line.split("\\s+");
+                          String h = p[p.length - 1].toLowerCase();
+                          if (h.contains(".")) adHosts.add(h);
+                      }
+                  } catch (Exception ignored) { }
+              }
+
+              void updateAdLists() {
+                  toast("Завантажую списки реклами...");
+                  new Thread(() -> {
+                      try {
+                          String txt = fetch("https://pgl.yoyo.org/adservers/serverlist.php?hostformat=nohtml&showintro=0&mimetype=plaintext");
+                          try (FileOutputStream o = new FileOutputStream(new File(getFilesDir(), "adhosts.txt"))) {
+                              o.write(txt.getBytes(StandardCharsets.UTF_8));
+                          }
+                          loadAdHosts();
+                          toast("Готово. Доменів у списку: " + adHosts.size());
+                      } catch (Exception e) {
+                          toast("Не вдалося оновити: " + e.getMessage());
+                      }
+                  }).start();
+              }
+          }
+          GHEOF
+          sed -i "s|Мій Браузер|$APP_NAME|" app/src/main/AndroidManifest.xml
+          if [ -f icon.png ]; then
+            mkdir -p app/src/main/res/mipmap-xxxhdpi
+            cp icon.png app/src/main/res/mipmap-xxxhdpi/ic_launcher.png
+            sed -i 's|@android:drawable/sym_def_app_icon|@mipmap/ic_launcher|' app/src/main/AndroidManifest.xml
+          fi
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 17
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: 8.7
+
+      - name: Build debug APK
+        run: gradle assembleDebug --no-daemon
+
+      - name: Publish APK to Releases
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Build ${{ github.run_number }}
+          files: app/build/outputs/apk/debug/app-debug.apk
+          
